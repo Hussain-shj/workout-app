@@ -92,6 +92,7 @@ textarea { min-height: 88px; resize: vertical; line-height: 1.45; }
 .set-row input { text-align: center; padding: 10px 6px; }
 .set-done { width: 38px; height: 38px; border: 1px solid #2b3740; border-radius: 11px; background: #161e25; color: #92a0ac; font-weight: 900; }
 .set-done.saved { background: #7cf29a; color: #07110a; border-color: #7cf29a; }
+.add-set-button { width: 100%; min-height: 42px; margin-top: 12px; border: 1px dashed #33414c; border-radius: 12px; background: #121920; color: #7cf29a; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: 800; }
 .exercise-notes { margin-top: 18px; padding-top: 16px; border-top: 1px solid #202a32; display: grid; gap: 8px; }
 .exercise-notes label { color: #94a2ad; font-size: 12px; font-weight: 800; }
 .note-save { justify-self: end; min-height: 36px; padding: 0 11px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid #2a363f; border-radius: 10px; background: #151d24; color: #dfe7ec; font-size: 12px; font-weight: 800; }
