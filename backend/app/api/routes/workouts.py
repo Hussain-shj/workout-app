@@ -8,6 +8,7 @@ from app.api.deps import get_current_user, get_db
 from app.models.training import (
     Exercise,
     ExerciseSession,
+    Program,
     ProgramDay,
     ProgramExercise,
     ProgressionRecommendation,
@@ -21,9 +22,84 @@ from app.services.progression import evaluate_progression
 router = APIRouter(prefix="/workouts", tags=["Workouts"])
 
 
+@router.get("/today")
+def todays_workout(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    program = db.scalar(
+        select(Program)
+        .where(Program.user_id == current_user.id, Program.is_active.is_(True))
+        .order_by(Program.id.desc())
+    )
+    if not program:
+        raise HTTPException(status_code=404, detail="No active program")
+
+    days = list(db.scalars(
+        select(ProgramDay).where(ProgramDay.program_id == program.id).order_by(ProgramDay.day_order)
+    ).all())
+    if not days:
+        raise HTTPException(status_code=404, detail="Program has no training days")
+
+    completed_count = db.scalar(
+        select(func.count(WorkoutSession.id)).where(
+            WorkoutSession.user_id == current_user.id,
+            WorkoutSession.completed_at.is_not(None),
+        )
+    ) or 0
+    day = days[completed_count % len(days)]
+
+    rows = db.execute(
+        select(ProgramExercise, Exercise)
+        .join(Exercise, Exercise.id == ProgramExercise.exercise_id)
+        .where(ProgramExercise.program_day_id == day.id)
+        .order_by(ProgramExercise.exercise_order)
+    ).all()
+
+    exercises = []
+    for pe, exercise in rows:
+        previous = db.execute(
+            select(WorkoutSet.weight_kg, WorkoutSet.reps, WorkoutSet.rir)
+            .join(ExerciseSession, ExerciseSession.id == WorkoutSet.exercise_session_id)
+            .join(WorkoutSession, WorkoutSession.id == ExerciseSession.workout_session_id)
+            .where(
+                WorkoutSession.user_id == current_user.id,
+                ExerciseSession.exercise_id == exercise.id,
+                WorkoutSet.completed.is_(True),
+            )
+            .order_by(WorkoutSession.workout_date.desc(), WorkoutSet.set_number.asc())
+            .limit(pe.target_sets)
+        ).all()
+        exercises.append({
+            "program_exercise_id": pe.id,
+            "exercise_id": exercise.id,
+            "name": exercise.name_en,
+            "name_ar": exercise.name_ar,
+            "target_sets": pe.target_sets,
+            "target_rep_min": pe.target_rep_min,
+            "target_rep_max": pe.target_rep_max,
+            "target_rir": pe.target_rir,
+            "youtube_url": exercise.youtube_url,
+            "previous_sets": [
+                {"weight_kg": row.weight_kg, "reps": row.reps, "rir": row.rir} for row in previous
+            ],
+        })
+
+    return {
+        "program_id": program.id,
+        "program_day_id": day.id,
+        "day_name": day.name,
+        "day_order": day.day_order,
+        "exercise_count": len(exercises),
+        "estimated_sets": sum(item[0].target_sets for item in rows),
+        "exercises": exercises,
+    }
+
+
 @router.post("/start")
 def start_workout(payload: StartWorkoutRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    day = db.get(ProgramDay, payload.program_day_id)
+    day = db.scalar(
+        select(ProgramDay)
+        .join(Program, Program.id == ProgramDay.program_id)
+        .where(ProgramDay.id == payload.program_day_id, Program.user_id == current_user.id, Program.is_active.is_(True))
+    )
     if not day:
         raise HTTPException(status_code=404, detail="Program day not found")
 
