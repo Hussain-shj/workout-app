@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -29,7 +30,7 @@ class AlternativeResponse(BaseModel):
 
 
 class ProgramGenerateRequest(BaseModel):
-    training_days: int = Field(pattern="^(3|5)$")
+    training_days: Literal[3, 5]
 
 
 class ProgramExerciseResponse(BaseModel):
