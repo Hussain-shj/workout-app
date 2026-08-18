@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.auth import router as auth_router
 from app.api.routes.exercises import router as exercises_router
@@ -16,7 +17,16 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Workout APP API", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Workout APP API", version="0.4.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(auth_router)
 app.include_router(exercises_router)
 app.include_router(programs_router)
@@ -26,7 +36,7 @@ app.include_router(recovery_router)
 
 @app.get("/")
 def root():
-    return {"app": "Workout APP", "status": "ok", "version": "0.3.0"}
+    return {"app": "Workout APP", "status": "ok", "version": "0.4.0"}
 
 
 @app.get("/health")
