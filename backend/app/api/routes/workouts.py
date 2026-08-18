@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_db
 from app.models.training import (
     Exercise,
+    ExerciseAlternative,
     ExerciseSession,
     Program,
     ProgramDay,
@@ -16,7 +17,15 @@ from app.models.training import (
     WorkoutSet,
 )
 from app.models.user import User
-from app.schemas.training import CompleteWorkoutRequest, ProgressionResponse, StartWorkoutRequest, WorkoutSetCreate, WorkoutSetResponse
+from app.schemas.training import (
+    CompleteWorkoutRequest,
+    ExerciseNoteUpdate,
+    ExerciseSwapRequest,
+    ProgressionResponse,
+    StartWorkoutRequest,
+    WorkoutSetCreate,
+    WorkoutSetResponse,
+)
 from app.services.progression import evaluate_progression
 
 router = APIRouter(prefix="/workouts", tags=["Workouts"])
@@ -131,10 +140,15 @@ def start_workout(payload: StartWorkoutRequest, db: Session = Depends(get_db), c
             "exercise_session_id": ex_session.id,
             "exercise_id": exercise.id,
             "name": exercise.name_en,
+            "name_ar": exercise.name_ar,
+            "primary_muscle": exercise.primary_muscle,
+            "movement_pattern": exercise.movement_pattern,
+            "youtube_url": exercise.youtube_url,
             "target_sets": pe.target_sets,
             "target_rep_min": pe.target_rep_min,
             "target_rep_max": pe.target_rep_max,
             "target_rir": pe.target_rir,
+            "notes": None,
         })
 
     db.commit()
@@ -172,6 +186,91 @@ def add_set(
     db.commit()
     db.refresh(item)
     return item
+
+
+@router.put("/{workout_id}/exercises/{exercise_session_id}/notes")
+def update_exercise_notes(
+    workout_id: int,
+    exercise_session_id: int,
+    payload: ExerciseNoteUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    workout = db.get(WorkoutSession, workout_id)
+    if not workout or workout.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Workout not found")
+    exercise_session = db.get(ExerciseSession, exercise_session_id)
+    if not exercise_session or exercise_session.workout_session_id != workout.id:
+        raise HTTPException(status_code=404, detail="Exercise session not found")
+    exercise_session.notes = payload.notes.strip() if payload.notes else None
+    db.commit()
+    return {"exercise_session_id": exercise_session.id, "notes": exercise_session.notes}
+
+
+@router.post("/{workout_id}/exercises/{exercise_session_id}/swap")
+def swap_exercise(
+    workout_id: int,
+    exercise_session_id: int,
+    payload: ExerciseSwapRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    workout = db.get(WorkoutSession, workout_id)
+    if not workout or workout.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Workout not found")
+    if workout.completed_at:
+        raise HTTPException(status_code=400, detail="Workout already completed")
+
+    exercise_session = db.get(ExerciseSession, exercise_session_id)
+    if not exercise_session or exercise_session.workout_session_id != workout.id:
+        raise HTTPException(status_code=404, detail="Exercise session not found")
+    if db.scalar(select(func.count(WorkoutSet.id)).where(WorkoutSet.exercise_session_id == exercise_session.id)):
+        raise HTTPException(status_code=400, detail="Cannot replace an exercise after sets have been recorded")
+
+    current_exercise = db.get(Exercise, exercise_session.exercise_id)
+    alternative = db.get(Exercise, payload.alternative_exercise_id)
+    if not current_exercise or not alternative or not alternative.is_active:
+        raise HTTPException(status_code=404, detail="Alternative exercise not found")
+
+    explicit = db.scalar(
+        select(ExerciseAlternative.id).where(
+            ExerciseAlternative.exercise_id == current_exercise.id,
+            ExerciseAlternative.alternative_exercise_id == alternative.id,
+        )
+    )
+    same_pattern = (
+        current_exercise.primary_muscle == alternative.primary_muscle
+        and current_exercise.movement_pattern == alternative.movement_pattern
+    )
+    if not explicit and not same_pattern:
+        raise HTTPException(status_code=400, detail="Selected exercise is not a compatible alternative")
+
+    exercise_session.exercise_id = alternative.id
+
+    if workout.program_day_id:
+        program_exercise = db.scalar(
+            select(ProgramExercise).where(
+                ProgramExercise.program_day_id == workout.program_day_id,
+                ProgramExercise.exercise_order == exercise_session.exercise_order,
+            )
+        )
+        if program_exercise:
+            program_exercise.exercise_id = alternative.id
+            program_exercise.target_rep_min = alternative.rep_min or program_exercise.target_rep_min
+            program_exercise.target_rep_max = alternative.rep_max or program_exercise.target_rep_max
+
+    db.commit()
+    return {
+        "exercise_session_id": exercise_session.id,
+        "exercise_id": alternative.id,
+        "name": alternative.name_en,
+        "name_ar": alternative.name_ar,
+        "primary_muscle": alternative.primary_muscle,
+        "movement_pattern": alternative.movement_pattern,
+        "youtube_url": alternative.youtube_url,
+        "target_rep_min": alternative.rep_min or 8,
+        "target_rep_max": alternative.rep_max or 12,
+    }
 
 
 @router.post("/{workout_id}/complete")
@@ -220,7 +319,7 @@ def get_workout(workout_id: int, db: Session = Depends(get_db), current_user: Us
         sets = list(db.scalars(select(WorkoutSet).where(WorkoutSet.exercise_session_id == ex_session.id).order_by(WorkoutSet.set_number)).all())
         exercises.append({
             "exercise_session_id": ex_session.id,
-            "exercise": {"id": exercise.id, "name": exercise.name_en, "name_ar": exercise.name_ar},
+            "exercise": {"id": exercise.id, "name": exercise.name_en, "name_ar": exercise.name_ar, "youtube_url": exercise.youtube_url},
             "notes": ex_session.notes,
             "sets": [{"id": s.id, "set_number": s.set_number, "weight_kg": s.weight_kg, "reps": s.reps, "rir": s.rir, "rpe": s.rpe, "completed": s.completed} for s in sets],
         })
