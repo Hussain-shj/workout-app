@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -25,10 +25,80 @@ from app.schemas.training import (
     StartWorkoutRequest,
     WorkoutSetCreate,
     WorkoutSetResponse,
+    WorkoutSetUpdate,
 )
 from app.services.progression import evaluate_progression
 
 router = APIRouter(prefix="/workouts", tags=["Workouts"])
+
+
+def _serialize_started_workout(db: Session, session: WorkoutSession, day: ProgramDay) -> dict:
+    rows = db.execute(
+        select(ExerciseSession, Exercise)
+        .join(Exercise, Exercise.id == ExerciseSession.exercise_id)
+        .where(ExerciseSession.workout_session_id == session.id)
+        .order_by(ExerciseSession.exercise_order)
+    ).all()
+
+    exercises = []
+    for ex_session, exercise in rows:
+        program_exercise = db.scalar(
+            select(ProgramExercise).where(
+                ProgramExercise.program_day_id == day.id,
+                ProgramExercise.exercise_order == ex_session.exercise_order,
+            )
+        )
+        sets = list(
+            db.scalars(
+                select(WorkoutSet)
+                .where(WorkoutSet.exercise_session_id == ex_session.id)
+                .order_by(WorkoutSet.set_number)
+            ).all()
+        )
+        exercises.append(
+            {
+                "exercise_session_id": ex_session.id,
+                "exercise_id": exercise.id,
+                "name": exercise.name_en,
+                "name_ar": exercise.name_ar,
+                "primary_muscle": exercise.primary_muscle,
+                "movement_pattern": exercise.movement_pattern,
+                "youtube_url": exercise.youtube_url,
+                "target_sets": program_exercise.target_sets if program_exercise else max(len(sets), 3),
+                "target_rep_min": program_exercise.target_rep_min if program_exercise else (exercise.rep_min or 8),
+                "target_rep_max": program_exercise.target_rep_max if program_exercise else (exercise.rep_max or 12),
+                "target_rir": program_exercise.target_rir if program_exercise else 2,
+                "notes": ex_session.notes,
+                "sets": [
+                    {
+                        "id": item.id,
+                        "set_number": item.set_number,
+                        "weight_kg": item.weight_kg,
+                        "reps": item.reps,
+                        "rir": item.rir,
+                        "rpe": item.rpe,
+                        "completed": item.completed,
+                    }
+                    for item in sets
+                ],
+            }
+        )
+
+    return {
+        "workout_session_id": session.id,
+        "day_name": day.name,
+        "started_at": session.started_at,
+        "exercises": exercises,
+    }
+
+
+def _get_owned_open_workout(db: Session, workout_id: int, current_user: User) -> WorkoutSession:
+    workout = db.get(WorkoutSession, workout_id)
+    if not workout or workout.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Workout not found")
+    if workout.completed_at:
+        raise HTTPException(status_code=400, detail="Workout already completed")
+    return workout
 
 
 @router.get("/today")
@@ -41,9 +111,9 @@ def todays_workout(db: Session = Depends(get_db), current_user: User = Depends(g
     if not program:
         raise HTTPException(status_code=404, detail="No active program")
 
-    days = list(db.scalars(
-        select(ProgramDay).where(ProgramDay.program_id == program.id).order_by(ProgramDay.day_order)
-    ).all())
+    days = list(
+        db.scalars(select(ProgramDay).where(ProgramDay.program_id == program.id).order_by(ProgramDay.day_order)).all()
+    )
     if not days:
         raise HTTPException(status_code=404, detail="Program has no training days")
 
@@ -76,20 +146,22 @@ def todays_workout(db: Session = Depends(get_db), current_user: User = Depends(g
             .order_by(WorkoutSession.workout_date.desc(), WorkoutSet.set_number.asc())
             .limit(pe.target_sets)
         ).all()
-        exercises.append({
-            "program_exercise_id": pe.id,
-            "exercise_id": exercise.id,
-            "name": exercise.name_en,
-            "name_ar": exercise.name_ar,
-            "target_sets": pe.target_sets,
-            "target_rep_min": pe.target_rep_min,
-            "target_rep_max": pe.target_rep_max,
-            "target_rir": pe.target_rir,
-            "youtube_url": exercise.youtube_url,
-            "previous_sets": [
-                {"weight_kg": row.weight_kg, "reps": row.reps, "rir": row.rir} for row in previous
-            ],
-        })
+        exercises.append(
+            {
+                "program_exercise_id": pe.id,
+                "exercise_id": exercise.id,
+                "name": exercise.name_en,
+                "name_ar": exercise.name_ar,
+                "target_sets": pe.target_sets,
+                "target_rep_min": pe.target_rep_min,
+                "target_rep_max": pe.target_rep_max,
+                "target_rir": pe.target_rir,
+                "youtube_url": exercise.youtube_url,
+                "previous_sets": [
+                    {"weight_kg": row.weight_kg, "reps": row.reps, "rir": row.rir} for row in previous
+                ],
+            }
+        )
 
     return {
         "program_id": program.id,
@@ -103,14 +175,35 @@ def todays_workout(db: Session = Depends(get_db), current_user: User = Depends(g
 
 
 @router.post("/start")
-def start_workout(payload: StartWorkoutRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def start_workout(
+    payload: StartWorkoutRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     day = db.scalar(
         select(ProgramDay)
         .join(Program, Program.id == ProgramDay.program_id)
-        .where(ProgramDay.id == payload.program_day_id, Program.user_id == current_user.id, Program.is_active.is_(True))
+        .where(
+            ProgramDay.id == payload.program_day_id,
+            Program.user_id == current_user.id,
+            Program.is_active.is_(True),
+        )
     )
     if not day:
         raise HTTPException(status_code=404, detail="Program day not found")
+
+    existing = db.scalar(
+        select(WorkoutSession)
+        .where(
+            WorkoutSession.user_id == current_user.id,
+            WorkoutSession.program_day_id == day.id,
+            WorkoutSession.workout_date == date.today(),
+            WorkoutSession.completed_at.is_(None),
+        )
+        .order_by(WorkoutSession.id.desc())
+    )
+    if existing:
+        return _serialize_started_workout(db, existing, day)
 
     session = WorkoutSession(
         user_id=current_user.id,
@@ -127,32 +220,60 @@ def start_workout(payload: StartWorkoutRequest, db: Session = Depends(get_db), c
         .order_by(ProgramExercise.exercise_order)
     ).all()
 
-    exercises = []
     for pe, exercise in rows:
-        ex_session = ExerciseSession(
-            workout_session_id=session.id,
-            exercise_id=exercise.id,
-            exercise_order=pe.exercise_order,
+        db.add(
+            ExerciseSession(
+                workout_session_id=session.id,
+                exercise_id=exercise.id,
+                exercise_order=pe.exercise_order,
+            )
         )
-        db.add(ex_session)
-        db.flush()
-        exercises.append({
-            "exercise_session_id": ex_session.id,
-            "exercise_id": exercise.id,
-            "name": exercise.name_en,
-            "name_ar": exercise.name_ar,
-            "primary_muscle": exercise.primary_muscle,
-            "movement_pattern": exercise.movement_pattern,
-            "youtube_url": exercise.youtube_url,
-            "target_sets": pe.target_sets,
-            "target_rep_min": pe.target_rep_min,
-            "target_rep_max": pe.target_rep_max,
-            "target_rir": pe.target_rir,
-            "notes": None,
-        })
 
     db.commit()
-    return {"workout_session_id": session.id, "day_name": day.name, "started_at": session.started_at, "exercises": exercises}
+    db.refresh(session)
+    return _serialize_started_workout(db, session, day)
+
+
+@router.get("/{workout_id}/exercises/{exercise_session_id}")
+def get_exercise_session(
+    workout_id: int,
+    exercise_session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    workout = db.get(WorkoutSession, workout_id)
+    if not workout or workout.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Workout not found")
+    ex_session = db.get(ExerciseSession, exercise_session_id)
+    if not ex_session or ex_session.workout_session_id != workout.id:
+        raise HTTPException(status_code=404, detail="Exercise session not found")
+    exercise = db.get(Exercise, ex_session.exercise_id)
+    sets = list(
+        db.scalars(
+            select(WorkoutSet)
+            .where(WorkoutSet.exercise_session_id == ex_session.id)
+            .order_by(WorkoutSet.set_number)
+        ).all()
+    )
+    return {
+        "exercise_session_id": ex_session.id,
+        "exercise_id": exercise.id,
+        "name": exercise.name_en,
+        "name_ar": exercise.name_ar,
+        "notes": ex_session.notes,
+        "sets": [
+            {
+                "id": item.id,
+                "set_number": item.set_number,
+                "weight_kg": item.weight_kg,
+                "reps": item.reps,
+                "rir": item.rir,
+                "rpe": item.rpe,
+                "completed": item.completed,
+            }
+            for item in sets
+        ],
+    }
 
 
 @router.post("/{workout_id}/sets", response_model=WorkoutSetResponse)
@@ -162,17 +283,14 @@ def add_set(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    workout = db.get(WorkoutSession, workout_id)
-    if not workout or workout.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Workout not found")
-    if workout.completed_at:
-        raise HTTPException(status_code=400, detail="Workout already completed")
-
+    workout = _get_owned_open_workout(db, workout_id, current_user)
     ex_session = db.get(ExerciseSession, payload.exercise_session_id)
-    if not ex_session or ex_session.workout_session_id != workout_id:
+    if not ex_session or ex_session.workout_session_id != workout.id:
         raise HTTPException(status_code=400, detail="Invalid exercise session")
 
-    next_number = (db.scalar(select(func.max(WorkoutSet.set_number)).where(WorkoutSet.exercise_session_id == ex_session.id)) or 0) + 1
+    next_number = (
+        db.scalar(select(func.max(WorkoutSet.set_number)).where(WorkoutSet.exercise_session_id == ex_session.id)) or 0
+    ) + 1
     item = WorkoutSet(
         exercise_session_id=ex_session.id,
         set_number=next_number,
@@ -188,6 +306,63 @@ def add_set(
     return item
 
 
+@router.put("/{workout_id}/sets/{set_id}", response_model=WorkoutSetResponse)
+def update_set(
+    workout_id: int,
+    set_id: int,
+    payload: WorkoutSetUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    workout = _get_owned_open_workout(db, workout_id, current_user)
+    item = db.get(WorkoutSet, set_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Set not found")
+    ex_session = db.get(ExerciseSession, item.exercise_session_id)
+    if not ex_session or ex_session.workout_session_id != workout.id:
+        raise HTTPException(status_code=404, detail="Set not found")
+
+    item.weight_kg = payload.weight_kg
+    item.reps = payload.reps
+    item.rir = payload.rir
+    item.rpe = payload.rpe
+    item.completed = payload.completed
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/{workout_id}/sets/{set_id}", status_code=204)
+def delete_set(
+    workout_id: int,
+    set_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    workout = _get_owned_open_workout(db, workout_id, current_user)
+    item = db.get(WorkoutSet, set_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Set not found")
+    ex_session = db.get(ExerciseSession, item.exercise_session_id)
+    if not ex_session or ex_session.workout_session_id != workout.id:
+        raise HTTPException(status_code=404, detail="Set not found")
+
+    exercise_session_id = item.exercise_session_id
+    db.delete(item)
+    db.flush()
+    remaining = list(
+        db.scalars(
+            select(WorkoutSet)
+            .where(WorkoutSet.exercise_session_id == exercise_session_id)
+            .order_by(WorkoutSet.set_number, WorkoutSet.id)
+        ).all()
+    )
+    for index, row in enumerate(remaining, start=1):
+        row.set_number = index
+    db.commit()
+    return Response(status_code=204)
+
+
 @router.put("/{workout_id}/exercises/{exercise_session_id}/notes")
 def update_exercise_notes(
     workout_id: int,
@@ -196,9 +371,7 @@ def update_exercise_notes(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    workout = db.get(WorkoutSession, workout_id)
-    if not workout or workout.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Workout not found")
+    workout = _get_owned_open_workout(db, workout_id, current_user)
     exercise_session = db.get(ExerciseSession, exercise_session_id)
     if not exercise_session or exercise_session.workout_session_id != workout.id:
         raise HTTPException(status_code=404, detail="Exercise session not found")
@@ -215,12 +388,7 @@ def swap_exercise(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    workout = db.get(WorkoutSession, workout_id)
-    if not workout or workout.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Workout not found")
-    if workout.completed_at:
-        raise HTTPException(status_code=400, detail="Workout already completed")
-
+    workout = _get_owned_open_workout(db, workout_id, current_user)
     exercise_session = db.get(ExerciseSession, exercise_session_id)
     if not exercise_session or exercise_session.workout_session_id != workout.id:
         raise HTTPException(status_code=404, detail="Exercise session not found")
@@ -297,11 +465,20 @@ def complete_workout(
     ) or 0.0
     workout.total_volume_kg = float(volume)
     db.commit()
-    return {"id": workout.id, "completed_at": workout.completed_at, "duration_minutes": workout.duration_minutes, "total_volume_kg": workout.total_volume_kg}
+    return {
+        "id": workout.id,
+        "completed_at": workout.completed_at,
+        "duration_minutes": workout.duration_minutes,
+        "total_volume_kg": workout.total_volume_kg,
+    }
 
 
 @router.get("/{workout_id}")
-def get_workout(workout_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_workout(
+    workout_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     workout = db.get(WorkoutSession, workout_id)
     if not workout or workout.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Workout not found")
@@ -316,13 +493,37 @@ def get_workout(workout_id: int, db: Session = Depends(get_db), current_user: Us
 
     exercises = []
     for ex_session, exercise in rows:
-        sets = list(db.scalars(select(WorkoutSet).where(WorkoutSet.exercise_session_id == ex_session.id).order_by(WorkoutSet.set_number)).all())
-        exercises.append({
-            "exercise_session_id": ex_session.id,
-            "exercise": {"id": exercise.id, "name": exercise.name_en, "name_ar": exercise.name_ar, "youtube_url": exercise.youtube_url},
-            "notes": ex_session.notes,
-            "sets": [{"id": s.id, "set_number": s.set_number, "weight_kg": s.weight_kg, "reps": s.reps, "rir": s.rir, "rpe": s.rpe, "completed": s.completed} for s in sets],
-        })
+        sets = list(
+            db.scalars(
+                select(WorkoutSet)
+                .where(WorkoutSet.exercise_session_id == ex_session.id)
+                .order_by(WorkoutSet.set_number)
+            ).all()
+        )
+        exercises.append(
+            {
+                "exercise_session_id": ex_session.id,
+                "exercise": {
+                    "id": exercise.id,
+                    "name": exercise.name_en,
+                    "name_ar": exercise.name_ar,
+                    "youtube_url": exercise.youtube_url,
+                },
+                "notes": ex_session.notes,
+                "sets": [
+                    {
+                        "id": s.id,
+                        "set_number": s.set_number,
+                        "weight_kg": s.weight_kg,
+                        "reps": s.reps,
+                        "rir": s.rir,
+                        "rpe": s.rpe,
+                        "completed": s.completed,
+                    }
+                    for s in sets
+                ],
+            }
+        )
 
     return {
         "id": workout.id,
@@ -338,7 +539,11 @@ def get_workout(workout_id: int, db: Session = Depends(get_db), current_user: Us
 
 
 @router.get("/{workout_id}/progression", response_model=list[ProgressionResponse])
-def workout_progression(workout_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def workout_progression(
+    workout_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     workout = db.get(WorkoutSession, workout_id)
     if not workout or workout.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Workout not found")
@@ -350,23 +555,34 @@ def workout_progression(workout_id: int, db: Session = Depends(get_db), current_
     ).all()
     output = []
     for ex_session, exercise in rows:
-        sets = list(db.scalars(select(WorkoutSet).where(WorkoutSet.exercise_session_id == ex_session.id).order_by(WorkoutSet.set_number)).all())
+        sets = list(
+            db.scalars(
+                select(WorkoutSet)
+                .where(WorkoutSet.exercise_session_id == ex_session.id)
+                .order_by(WorkoutSet.set_number)
+            ).all()
+        )
         if not sets:
             continue
         decision = evaluate_progression(
-            [{"weight_kg": s.weight_kg, "reps": s.reps, "rir": s.rir, "completed": s.completed} for s in sets],
+            [
+                {"weight_kg": s.weight_kg, "reps": s.reps, "rir": s.rir, "completed": s.completed}
+                for s in sets
+            ],
             exercise.rep_min or 8,
             exercise.rep_max or 12,
             exercise.minimum_weight_increment or 2.5,
         )
-        db.add(ProgressionRecommendation(
-            user_id=current_user.id,
-            exercise_id=exercise.id,
-            decision=decision.decision,
-            current_weight_kg=decision.current_weight_kg,
-            recommended_weight_kg=decision.recommended_weight_kg,
-            reason=decision.reason,
-        ))
+        db.add(
+            ProgressionRecommendation(
+                user_id=current_user.id,
+                exercise_id=exercise.id,
+                decision=decision.decision,
+                current_weight_kg=decision.current_weight_kg,
+                recommended_weight_kg=decision.recommended_weight_kg,
+                reason=decision.reason,
+            )
+        )
         output.append(ProgressionResponse(**decision.__dict__))
 
     db.commit()
@@ -374,13 +590,19 @@ def workout_progression(workout_id: int, db: Session = Depends(get_db), current_
 
 
 @router.get("")
-def workout_history(limit: int = 20, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    sessions = list(db.scalars(
-        select(WorkoutSession)
-        .where(WorkoutSession.user_id == current_user.id)
-        .order_by(WorkoutSession.workout_date.desc(), WorkoutSession.id.desc())
-        .limit(min(max(limit, 1), 100))
-    ).all())
+def workout_history(
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    sessions = list(
+        db.scalars(
+            select(WorkoutSession)
+            .where(WorkoutSession.user_id == current_user.id)
+            .order_by(WorkoutSession.workout_date.desc(), WorkoutSession.id.desc())
+            .limit(min(max(limit, 1), 100))
+        ).all()
+    )
     return [
         {
             "id": w.id,
