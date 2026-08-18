@@ -1,0 +1,51 @@
+.editable-head,
+.editable-set-row {
+  grid-template-columns: 34px minmax(54px,1fr) minmax(54px,1fr) minmax(50px,.8fr) 78px;
+}
+
+.set-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.set-save,
+.set-delete {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #2b3740;
+  background: #161e25;
+  color: #9eabb5;
+}
+
+.set-save.saved {
+  color: #7cf29a;
+  border-color: rgba(124,242,154,.35);
+  background: rgba(124,242,154,.08);
+}
+
+.set-delete {
+  color: #ff8f8f;
+  border-color: rgba(255,120,120,.25);
+}
+
+.editable-set-row input {
+  min-width: 0;
+}
+
+@media (max-width: 430px) {
+  .editable-head,
+  .editable-set-row {
+    grid-template-columns: 26px minmax(46px,1fr) minmax(46px,1fr) minmax(42px,.8fr) 70px;
+    gap: 5px;
+  }
+  .set-save,
+  .set-delete {
+    width: 32px;
+    height: 34px;
+  }
+  .set-actions { gap: 4px; }
+}
