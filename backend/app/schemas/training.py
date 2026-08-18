@@ -65,8 +65,16 @@ class StartWorkoutRequest(BaseModel):
 class WorkoutSetCreate(BaseModel):
     exercise_session_id: int
     weight_kg: float = Field(ge=0)
-    reps: int = Field(ge=0, le=100)
-    rir: float | None = Field(default=None, ge=0, le=10)
+    reps: int = Field(ge=1, le=100)
+    rir: float = Field(ge=0, le=10)
+    rpe: float | None = Field(default=None, ge=0, le=10)
+    completed: bool = True
+
+
+class WorkoutSetUpdate(BaseModel):
+    weight_kg: float = Field(ge=0)
+    reps: int = Field(ge=1, le=100)
+    rir: float = Field(ge=0, le=10)
     rpe: float | None = Field(default=None, ge=0, le=10)
     completed: bool = True
 
