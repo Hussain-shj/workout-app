@@ -102,6 +102,14 @@ class CompleteWorkoutRequest(BaseModel):
     notes: str | None = None
 
 
+class ExerciseNoteUpdate(BaseModel):
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class ExerciseSwapRequest(BaseModel):
+    alternative_exercise_id: int
+
+
 class RecoveryCreate(BaseModel):
     sleep: int = Field(ge=1, le=5)
     energy: int = Field(ge=1, le=5)
