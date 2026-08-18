@@ -17,11 +17,14 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Workout APP API", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Workout APP API", version="0.4.1", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "https://workout-frontend-production-067c.up.railway.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -36,7 +39,7 @@ app.include_router(recovery_router)
 
 @app.get("/")
 def root():
-    return {"app": "Workout APP", "status": "ok", "version": "0.4.0"}
+    return {"app": "Workout APP", "status": "ok", "version": "0.4.1"}
 
 
 @app.get("/health")
