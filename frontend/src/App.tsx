@@ -1,5 +1,5 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react'
-import { Activity, Dumbbell, History, Home, LogOut, Play, UserRound } from 'lucide-react'
+import { FormEvent, useEffect, useState } from 'react'
+import { Activity, Dumbbell, ExternalLink, History, Home, LogOut, Play, RefreshCw, Save, UserRound, X } from 'lucide-react'
 import { api, clearTokens, getAccessToken, saveTokens } from './api'
 
 type User = {
@@ -15,6 +15,10 @@ type Exercise = {
   name_en: string
   name_ar?: string | null
   primary_muscle: string
+  secondary_muscles?: string | null
+  movement_pattern?: string
+  equipment?: string
+  youtube_url?: string | null
 }
 
 type ProgramExercise = {
@@ -40,18 +44,25 @@ type Program = {
   days: ProgramDay[]
 }
 
+type WorkoutExercise = {
+  exercise_session_id: number
+  exercise_id: number
+  name: string
+  name_ar?: string | null
+  primary_muscle?: string
+  movement_pattern?: string
+  youtube_url?: string | null
+  target_sets: number
+  target_rep_min: number
+  target_rep_max: number
+  target_rir: number | null
+  notes?: string | null
+}
+
 type StartedWorkout = {
   workout_session_id: number
   day_name: string
-  exercises: Array<{
-    exercise_session_id: number
-    exercise_id: number
-    name: string
-    target_sets: number
-    target_rep_min: number
-    target_rep_max: number
-    target_rir: number | null
-  }>
+  exercises: WorkoutExercise[]
 }
 
 type HistoryItem = {
@@ -60,6 +71,12 @@ type HistoryItem = {
   duration_minutes: number | null
   total_volume_kg: number
   completed_at: string | null
+}
+
+type Alternative = {
+  exercise: Exercise
+  priority: number
+  reason?: string | null
 }
 
 function App() {
@@ -319,11 +336,18 @@ function Onboarding({ user, onComplete }: { user: User; onComplete: () => Promis
 }
 
 function WorkoutScreen({ workout, onComplete }: { workout: StartedWorkout; onComplete: () => Promise<void> }) {
+  const [exercises, setExercises] = useState<WorkoutExercise[]>(workout.exercises)
   const [setData, setSetData] = useState<Record<number, Array<{ weight: string; reps: string; rir: string; saved?: boolean }>>>({})
+  const [notes, setNotes] = useState<Record<number, string>>(() => Object.fromEntries(workout.exercises.map((e) => [e.exercise_session_id, e.notes || ''])))
+  const [noteSaved, setNoteSaved] = useState<Record<number, boolean>>({})
+  const [swapFor, setSwapFor] = useState<WorkoutExercise | null>(null)
+  const [alternatives, setAlternatives] = useState<Alternative[]>([])
+  const [swapBusy, setSwapBusy] = useState(false)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
 
-  const rowsFor = (ex: StartedWorkout['exercises'][number]) => {
+  const rowsFor = (ex: WorkoutExercise) => {
     const current = setData[ex.exercise_session_id]
     if (current) return current
     return Array.from({ length: ex.target_sets }, () => ({ weight: '', reps: '', rir: String(ex.target_rir ?? 2) }))
@@ -331,7 +355,7 @@ function WorkoutScreen({ workout, onComplete }: { workout: StartedWorkout; onCom
 
   const updateRow = (id: number, index: number, field: 'weight' | 'reps' | 'rir', value: string) => {
     setSetData((prev) => {
-      const exercise = workout.exercises.find((x) => x.exercise_session_id === id)!
+      const exercise = exercises.find((x) => x.exercise_session_id === id)!
       const rows = [...(prev[id] || rowsFor(exercise))]
       rows[index] = { ...rows[index], [field]: value }
       return { ...prev, [id]: rows }
@@ -339,29 +363,102 @@ function WorkoutScreen({ workout, onComplete }: { workout: StartedWorkout; onCom
   }
 
   const saveSet = async (exerciseSessionId: number, index: number) => {
-    const exercise = workout.exercises.find((x) => x.exercise_session_id === exerciseSessionId)!
-    const rows = setData[exerciseSessionId] || rowsFor(exercise)
-    const row = rows[index]
-    if (!row.weight || !row.reps) return
-    await api(`/workouts/${workout.workout_session_id}/sets`, {
-      method: 'POST',
-      body: JSON.stringify({ exercise_session_id: exerciseSessionId, weight_kg: Number(row.weight), reps: Number(row.reps), rir: row.rir ? Number(row.rir) : null, completed: true }),
-    })
-    setSetData((prev) => {
-      const copy = [...(prev[exerciseSessionId] || rows)]
-      copy[index] = { ...copy[index], saved: true }
-      return { ...prev, [exerciseSessionId]: copy }
-    })
+    setError('')
+    try {
+      const exercise = exercises.find((x) => x.exercise_session_id === exerciseSessionId)!
+      const rows = setData[exerciseSessionId] || rowsFor(exercise)
+      const row = rows[index]
+      if (!row.weight || !row.reps) return
+      await api(`/workouts/${workout.workout_session_id}/sets`, {
+        method: 'POST',
+        body: JSON.stringify({ exercise_session_id: exerciseSessionId, weight_kg: Number(row.weight), reps: Number(row.reps), rir: row.rir ? Number(row.rir) : null, completed: true }),
+      })
+      setSetData((prev) => {
+        const copy = [...(prev[exerciseSessionId] || rows)]
+        copy[index] = { ...copy[index], saved: true }
+        return { ...prev, [exerciseSessionId]: copy }
+      })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to save set')
+    }
+  }
+
+  const saveNote = async (exerciseSessionId: number) => {
+    setError('')
+    try {
+      await api(`/workouts/${workout.workout_session_id}/exercises/${exerciseSessionId}/notes`, {
+        method: 'PUT',
+        body: JSON.stringify({ notes: notes[exerciseSessionId] || null }),
+      })
+      setNoteSaved((prev) => ({ ...prev, [exerciseSessionId]: true }))
+      window.setTimeout(() => setNoteSaved((prev) => ({ ...prev, [exerciseSessionId]: false })), 1800)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to save note')
+    }
+  }
+
+  const openSwap = async (ex: WorkoutExercise) => {
+    setError('')
+    setSwapFor(ex)
+    setAlternatives([])
+    setSwapBusy(true)
+    try {
+      const data = await api<Alternative[]>(`/exercises/${ex.exercise_id}/alternatives`)
+      setAlternatives(data)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to load alternatives')
+      setSwapFor(null)
+    } finally {
+      setSwapBusy(false)
+    }
+  }
+
+  const chooseAlternative = async (alternative: Alternative) => {
+    if (!swapFor) return
+    setSwapBusy(true)
+    setError('')
+    try {
+      const updated = await api<Partial<WorkoutExercise>>(`/workouts/${workout.workout_session_id}/exercises/${swapFor.exercise_session_id}/swap`, {
+        method: 'POST',
+        body: JSON.stringify({ alternative_exercise_id: alternative.exercise.id }),
+      })
+      setExercises((prev) => prev.map((item) => item.exercise_session_id === swapFor.exercise_session_id ? {
+        ...item,
+        exercise_id: updated.exercise_id ?? alternative.exercise.id,
+        name: updated.name ?? alternative.exercise.name_en,
+        name_ar: updated.name_ar ?? alternative.exercise.name_ar,
+        primary_muscle: updated.primary_muscle ?? alternative.exercise.primary_muscle,
+        movement_pattern: updated.movement_pattern ?? alternative.exercise.movement_pattern,
+        youtube_url: updated.youtube_url ?? alternative.exercise.youtube_url,
+        target_rep_min: updated.target_rep_min ?? item.target_rep_min,
+        target_rep_max: updated.target_rep_max ?? item.target_rep_max,
+      } : item))
+      setSwapFor(null)
+      setAlternatives([])
+      setMessage('Exercise replaced. The change will also be used in future sessions.')
+      window.setTimeout(() => setMessage(''), 2500)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to replace exercise')
+    } finally {
+      setSwapBusy(false)
+    }
   }
 
   const finish = async () => {
     setBusy(true)
     setMessage('')
+    setError('')
     try {
+      await Promise.all(exercises.map((ex) => api(`/workouts/${workout.workout_session_id}/exercises/${ex.exercise_session_id}/notes`, {
+        method: 'PUT',
+        body: JSON.stringify({ notes: notes[ex.exercise_session_id] || null }),
+      })))
       await api(`/workouts/${workout.workout_session_id}/complete`, { method: 'POST', body: JSON.stringify({ notes: null }) })
       try { await api(`/workouts/${workout.workout_session_id}/progression`) } catch {}
       setMessage('Workout completed')
       await onComplete()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to complete workout')
     } finally {
       setBusy(false)
     }
@@ -370,11 +467,33 @@ function WorkoutScreen({ workout, onComplete }: { workout: StartedWorkout; onCom
   return (
     <section>
       <div className="workout-header"><div><span className="eyebrow">IN PROGRESS</span><h2>{workout.day_name}</h2></div><Activity size={26} /></div>
-      {workout.exercises.map((ex) => {
+      {error && <div className="error-banner workout-alert">{error}</div>}
+      {message && <div className="success-banner workout-alert">{message}</div>}
+
+      {exercises.map((ex) => {
         const rows = setData[ex.exercise_session_id] || rowsFor(ex)
+        const hasSavedSet = rows.some((row) => row.saved)
         return (
           <div className="exercise-card" key={ex.exercise_session_id}>
-            <div className="exercise-title"><div><strong>{ex.name}</strong><span>{ex.target_sets} × {ex.target_rep_min}-{ex.target_rep_max} · RIR {ex.target_rir ?? 2}</span></div></div>
+            <div className="exercise-title">
+              <div>
+                <strong>{ex.name}</strong>
+                {ex.name_ar && <span className="exercise-ar">{ex.name_ar}</span>}
+                <span>{ex.target_sets} × {ex.target_rep_min}-{ex.target_rep_max} · RIR {ex.target_rir ?? 2}</span>
+              </div>
+            </div>
+
+            <div className="exercise-actions">
+              {ex.youtube_url && (
+                <a className="exercise-action youtube-action" href={ex.youtube_url} target="_blank" rel="noreferrer">
+                  <ExternalLink size={16} /> YouTube
+                </a>
+              )}
+              <button className="exercise-action" onClick={() => openSwap(ex)} disabled={hasSavedSet} title={hasSavedSet ? 'Exercise cannot be replaced after saving sets' : 'Replace exercise'}>
+                <RefreshCw size={16} /> Replace
+              </button>
+            </div>
+
             <div className="set-table-head"><span>SET</span><span>KG</span><span>REPS</span><span>RIR</span><span></span></div>
             {rows.map((row, i) => (
               <div className="set-row" key={i}>
@@ -382,14 +501,57 @@ function WorkoutScreen({ workout, onComplete }: { workout: StartedWorkout; onCom
                 <input inputMode="decimal" value={row.weight} onChange={(e) => updateRow(ex.exercise_session_id, i, 'weight', e.target.value)} placeholder="0" />
                 <input inputMode="numeric" value={row.reps} onChange={(e) => updateRow(ex.exercise_session_id, i, 'reps', e.target.value)} placeholder="0" />
                 <input inputMode="decimal" value={row.rir} onChange={(e) => updateRow(ex.exercise_session_id, i, 'rir', e.target.value)} />
-                <button className={row.saved ? 'set-done saved' : 'set-done'} onClick={() => saveSet(ex.exercise_session_id, i)}>{row.saved ? '✓' : '+'}</button>
+                <button className={row.saved ? 'set-done saved' : 'set-done'} onClick={() => saveSet(ex.exercise_session_id, i)} disabled={row.saved}>{row.saved ? '✓' : '+'}</button>
               </div>
             ))}
+
+            <div className="exercise-notes">
+              <label>Exercise notes</label>
+              <textarea
+                value={notes[ex.exercise_session_id] || ''}
+                onChange={(e) => {
+                  setNotes((prev) => ({ ...prev, [ex.exercise_session_id]: e.target.value }))
+                  setNoteSaved((prev) => ({ ...prev, [ex.exercise_session_id]: false }))
+                }}
+                placeholder="Example: Last set felt heavy, shoulder discomfort, good control..."
+                maxLength={2000}
+              />
+              <button className="note-save" onClick={() => saveNote(ex.exercise_session_id)}>
+                <Save size={15} /> {noteSaved[ex.exercise_session_id] ? 'Saved' : 'Save note'}
+              </button>
+            </div>
           </div>
         )
       })}
-      {message && <div className="success-banner">{message}</div>}
+
       <button className="primary-button full finish-button" onClick={finish} disabled={busy}>{busy ? 'Finishing...' : 'Complete Workout'}</button>
+
+      {swapFor && (
+        <div className="modal-backdrop" onClick={() => !swapBusy && setSwapFor(null)}>
+          <div className="swap-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="swap-modal-head">
+              <div><span className="eyebrow">REPLACE EXERCISE</span><h3>{swapFor.name}</h3></div>
+              <button className="icon-button" onClick={() => setSwapFor(null)} disabled={swapBusy}><X size={20} /></button>
+            </div>
+            <p className="muted">Alternatives target the same muscle and movement pattern.</p>
+            {swapBusy && alternatives.length === 0 ? <div className="modal-loading">Loading alternatives...</div> : (
+              <div className="alternative-list">
+                {alternatives.length === 0 && <div className="empty-card">No compatible alternatives found.</div>}
+                {alternatives.map((alt) => (
+                  <button className="alternative-card" key={alt.exercise.id} onClick={() => chooseAlternative(alt)} disabled={swapBusy}>
+                    <div>
+                      <strong>{alt.exercise.name_en}</strong>
+                      {alt.exercise.name_ar && <span>{alt.exercise.name_ar}</span>}
+                      <small>{alt.exercise.equipment} · {alt.exercise.movement_pattern}</small>
+                    </div>
+                    <RefreshCw size={18} />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </section>
   )
 }
